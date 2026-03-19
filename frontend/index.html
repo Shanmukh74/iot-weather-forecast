@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>IoT Weather Forecasting Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <!-- Google Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;800&display=swap" rel="stylesheet">
+
+    <!-- Font Awesome CDN (Stable Version) -->
+    <link rel="stylesheet"
+          href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css"/>
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+body {
+    margin:0;
+    font-family:'Poppins',sans-serif;
+    background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);
+    color:white;
+}
+
+.container {
+    padding:40px;
+    text-align:center;
+}
+
+h1 {
+    font-weight:800;
+    margin-bottom:40px;
+    font-size:32px;
+}
+
+.cards {
+    display:flex;
+    flex-wrap:wrap;
+    justify-content:center;
+    gap:20px;
+}
+
+.card {
+    background:rgba(255,255,255,0.08);
+    backdrop-filter:blur(12px);
+    padding:20px;
+    border-radius:20px;
+    width:210px;
+    box-shadow:0 10px 30px rgba(0,0,0,0.4);
+    transition:0.3s;
+}
+
+.card:hover {
+    transform:translateY(-6px);
+}
+
+.card h3 {
+    font-size:15px;
+    margin-bottom:10px;
+    font-weight:600;
+}
+
+.value {
+    font-size:22px;
+    font-weight:600;
+}
+
+.mae-card {
+    margin:30px auto;
+    width:260px;
+}
+
+.chart-box {
+    margin-top:40px;
+    background:rgba(255,255,255,0.08);
+    padding:30px;
+    border-radius:25px;
+    box-shadow:0 10px 30px rgba(0,0,0,0.4);
+}
+
+.section-title {
+    margin-bottom:20px;
+    font-weight:600;
+    font-size:18px;
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<h1>
+    <i class="fa-solid fa-cloud-sun"></i>
+    IoT Weather Forecasting Dashboard
+</h1>
+
+<div class="cards">
+
+    <div class="card">
+        <h3><i class="fa-solid fa-temperature-half"></i> Current Temp</h3>
+        <div id="currentTemp" class="value">--</div>
+    </div>
+
+    <div class="card">
+        <h3><i class="fa-solid fa-droplet"></i> Humidity</h3>
+        <div id="humidity" class="value">--</div>
+    </div>
+
+    <div class="card">
+        <h3><i class="fa-solid fa-gauge-high"></i> Pressure</h3>
+        <div id="pressure" class="value">--</div>
+    </div>
+
+    <div class="card">
+        <h3><i class="fa-solid fa-cloud-rain"></i> Rainfall</h3>
+        <div id="rainfall" class="value">--</div>
+    </div>
+
+    <div class="card">
+        <h3><i class="fa-solid fa-chart-line"></i> Forecast (10 min)</h3>
+        <div id="forecast" class="value">--</div>
+    </div>
+
+    <div class="card">
+        <h3><i class="fa-solid fa-clock"></i> Countdown</h3>
+        <div id="countdown" class="value">--</div>
+    </div>
+
+</div>
+
+<div class="card mae-card">
+    <h3><i class="fa-solid fa-square-root-variable"></i> Average MAE</h3>
+    <div id="mae" class="value">--</div>
+</div>
+
+<div class="chart-box">
+    <div class="section-title">
+        <i class="fa-solid fa-wave-square"></i>
+        Live Temperature
+    </div>
+    <canvas id="liveChart"></canvas>
+</div>
+
+<div class="chart-box">
+    <div class="section-title">
+        <i class="fa-solid fa-chart-area"></i>
+        Forecast vs Actual
+    </div>
+    <canvas id="forecastChart"></canvas>
+</div>
+
+</div>
+
+<script>
+
+const backend = "http://127.0.0.1:5000";
+let targetTime;
+
+// ---------------- Live Temperature Chart ----------------
+let liveChart = new Chart(document.getElementById("liveChart"), {
+    type: "line",
+    data: {
+        labels: [],
+        datasets: [{
+            label: "Live Temperature",
+            borderColor: "#FFA500",
+            backgroundColor: "transparent",
+            data: [],
+            tension: 0   // ← Sharp spikes
+        }]
+    },
+    options: {
+        responsive: true,
+        scales: {
+            x: { ticks: { color: "white" } },
+            y: { ticks: { color: "white" } }
+        },
+        plugins: {
+            legend: { labels: { color: "white" } }
+        }
+    }
+});
+
+// ---------------- Forecast Chart ----------------
+let forecastChart = new Chart(document.getElementById("forecastChart"), {
+    type: "line",
+    data: {
+        labels: [],
+        datasets: [
+            {
+                label: "Predicted",
+                borderColor: "gold",
+                backgroundColor: "transparent",
+                data: [],
+                tension: 0   // ← Sharp spikes
+            },
+            {
+                label: "Actual",
+                borderColor: "cyan",
+                backgroundColor: "transparent",
+                data: [],
+                tension: 0   // ← Sharp spikes
+            }
+        ]
+    },
+    options: {
+        responsive: true,
+        scales: {
+            x: { ticks: { color: "white" } },
+            y: { ticks: { color: "white" } }
+        },
+        plugins: {
+            legend: { labels: { color: "white" } }
+        }
+    }
+});
+
+// ---------------- API Calls ----------------
+
+async function loadCurrent(){
+    const res = await fetch(backend+"/current");
+    const data = await res.json();
+
+    document.getElementById("currentTemp").innerText = data.temperature.toFixed(2)+" °C";
+    document.getElementById("humidity").innerText = data.humidity.toFixed(2)+" %";
+    document.getElementById("pressure").innerText = data.pressure.toFixed(2)+" hPa";
+    document.getElementById("rainfall").innerText = data.rainfall.toFixed(2)+" mm";
+}
+
+async function loadForecast(){
+    const res = await fetch(backend+"/predict");
+    const data = await res.json();
+
+    document.getElementById("forecast").innerText =
+        data.forecast_temperature_10min.toFixed(2)+" °C";
+
+    targetTime = new Date(data.target_time);
+}
+
+function updateCountdown(){
+    if(!targetTime) return;
+
+    const now = new Date();
+    const diff = targetTime - now;
+
+    if(diff > 0){
+        const m = Math.floor(diff/60000);
+        const s = Math.floor((diff%60000)/1000);
+        document.getElementById("countdown").innerText = m+"m "+s+"s";
+    } else {
+        loadForecast();
+        loadHistory();
+    }
+}
+
+async function loadAccuracy(){
+    const res = await fetch(backend+"/accuracy");
+    const data = await res.json();
+
+    if(data.Average_MAE){
+        document.getElementById("mae").innerText =
+            data.Average_MAE.toFixed(2)+" °C";
+    }
+}
+
+async function loadHistory(){
+    const res = await fetch(backend+"/history");
+    const data = await res.json();
+
+    forecastChart.data.labels =
+        data.map(d => d.target_time.split(" ")[1]);
+
+    forecastChart.data.datasets[0].data =
+        data.map(d => d.predicted_temperature);
+
+    forecastChart.data.datasets[1].data =
+        data.map(d => d.actual_temperature);
+
+    forecastChart.update();
+}
+
+async function loadLiveHistory(){
+    const res = await fetch(backend+"/live-history");
+    const data = await res.json();
+
+    liveChart.data.labels =
+        data.map(d => new Date(d.timestamp).toLocaleTimeString());
+
+    liveChart.data.datasets[0].data =
+        data.map(d => d.temperature);
+
+    liveChart.update();
+}
+
+// ---------------- Initialize ----------------
+loadCurrent();
+loadForecast();
+loadAccuracy();
+loadHistory();
+loadLiveHistory();
+
+setInterval(loadCurrent, 5000);
+setInterval(loadLiveHistory, 5000);
+setInterval(updateCountdown, 1000);
+setInterval(loadAccuracy, 30000);
+setInterval(loadHistory, 30000);
+
+</script>
+
+</body>
+</html>
