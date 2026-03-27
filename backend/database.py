@@ -1,43 +1,93 @@
 import pandas as pd
-from datetime import datetime
+import os
 
-DATA_FILE = "../data/weather_data.csv"
-PREDICTION_FILE = "../data/predictions_log.csv"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_PATH = os.path.join(BASE_DIR, "../data/weather_data.csv")
+PRED_PATH = os.path.join(BASE_DIR, "../data/predictions_log.csv")
 
-# -------------------------
-# Weather Data
-# -------------------------
+
+# ----------------------------
+# GET ALL WEATHER DATA
+# ----------------------------
 def get_all_data():
-    df = pd.read_csv(DATA_FILE, header=None)
-    df.columns = ["timestamp", "temperature", "humidity", "pressure", "rainfall"]
-    return df
+    try:
+        print("Reading CSV from:", DATA_PATH)
 
+        if not os.path.exists(DATA_PATH):
+            print("CSV NOT FOUND")
+            return None
+
+        df = pd.read_csv(DATA_PATH)
+
+        if df.empty:
+            print("CSV EMPTY")
+            return None
+
+        # FIX column names (important)
+        df.columns = df.columns.str.strip()
+
+        # Convert timestamp safely
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors='coerce')
+
+        # Drop invalid rows
+        df = df.dropna()
+
+        print("ROWS LOADED:", len(df))
+
+        return df
+
+    except Exception as e:
+        print("ERROR reading CSV:", e)
+        return None
+
+
+# ----------------------------
+# GET LATEST ROW
+# ----------------------------
 def get_latest_data():
     df = get_all_data()
-    return df.iloc[-1]
 
-# -------------------------
-# Prediction Log
-# -------------------------
-def save_prediction(pred_time, target_time, predicted_temp):
-    df = pd.DataFrame([{
+    if df is None or df.empty:
+        return None
+
+    return df.iloc[-1]   # ✅ return actual row
+
+
+# ----------------------------
+# SAVE PREDICTION
+# ----------------------------
+def save_prediction(pred_time, target_time, prediction):
+
+    data = {
         "prediction_time": pred_time,
         "target_time": target_time,
-        "predicted_temperature": predicted_temp,
+        "predicted_temperature": prediction,
         "actual_temperature": None,
         "error": None
-    }])
+    }
 
-    try:
-        existing = pd.read_csv(PREDICTION_FILE)
-        df.to_csv(PREDICTION_FILE, mode='a', header=False, index=False)
-    except FileNotFoundError:
-        df.to_csv(PREDICTION_FILE, index=False)
+    df = pd.DataFrame([data])
+
+    if not os.path.exists(PRED_PATH):
+        df.to_csv(PRED_PATH, index=False)
+    else:
+        df.to_csv(PRED_PATH, mode='a', header=False, index=False)
 
 
+# ----------------------------
+# GET PREDICTIONS
+# ----------------------------
 def get_predictions():
     try:
-        df = pd.read_csv(PREDICTION_FILE)
+        if not os.path.exists(PRED_PATH):
+            return pd.DataFrame()
+
+        df = pd.read_csv(PRED_PATH)
+
+        df.columns = df.columns.str.strip()
+
         return df
-    except FileNotFoundError:
+
+    except Exception as e:
+        print("ERROR reading predictions:", e)
         return pd.DataFrame()

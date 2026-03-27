@@ -2,28 +2,133 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 import joblib
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
-
-from database import get_latest_data, save_prediction, get_predictions, get_all_data
+import requests
 
 app = Flask(__name__)
 CORS(app)
 
 # ------------------------------------------------
-# FIX PATH FOR MODEL (IMPORTANT FOR RENDER)
+# IST TIMEZONE
+# ------------------------------------------------
+IST = timezone(timedelta(hours=5, minutes=30))
+
+# ------------------------------------------------
+# THINGSPEAK CONFIG
+# ------------------------------------------------
+CHANNEL_ID = "3308123"
+
+# ------------------------------------------------
+# PATHS
 # ------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "../model/temperature_forecast_model.pkl")
+PRED_PATH = os.path.join(BASE_DIR, "../data/predictions_log.csv")
 
 model = joblib.load(MODEL_PATH)
 
+# ------------------------------------------------
+# READ DATA FROM THINGSPEAK
+# ------------------------------------------------
+def read_weather_data():
+    try:
+        url = f"https://api.thingspeak.com/channels/{CHANNEL_ID}/feeds.json?results=30"
+        response = requests.get(url)
+
+        if response.status_code != 200:
+            print("API Error:", response.text)
+            return None
+
+        data = response.json()
+
+        if not isinstance(data, dict) or "feeds" not in data:
+            return None
+
+        df = pd.DataFrame(data["feeds"])
+
+        df["temperature"] = pd.to_numeric(df["field1"], errors="coerce")
+        df["humidity"] = pd.to_numeric(df["field2"], errors="coerce")
+        df["pressure"] = pd.to_numeric(df["field3"], errors="coerce")
+        df["rainfall"] = pd.to_numeric(df["field4"], errors="coerce")
+
+        df["timestamp"] = pd.to_datetime(df["created_at"], utc=True).dt.tz_convert(IST)
+
+        df = df.dropna()
+
+        return df
+
+    except Exception as e:
+        print("ERROR:", e)
+        return None
+
 
 # ------------------------------------------------
-# BUILD INPUT FEATURES (Lag-based)
+# SAVE PREDICTION TO CSV
+# ------------------------------------------------
+def save_prediction(pred_time, target_time, prediction):
+
+    data = {
+        "prediction_time": pred_time.isoformat(),
+        "target_time": target_time.isoformat(),
+        "predicted_temperature": prediction,
+        "actual_temperature": None,
+        "error": None
+    }
+
+    df = pd.DataFrame([data])
+
+    if not os.path.exists(PRED_PATH):
+        df.to_csv(PRED_PATH, index=False)
+    else:
+        df.to_csv(PRED_PATH, mode='a', header=False, index=False)
+
+
+# ------------------------------------------------
+# LOAD PREDICTIONS
+# ------------------------------------------------
+def get_predictions():
+    if not os.path.exists(PRED_PATH):
+        return pd.DataFrame()
+
+    df = pd.read_csv(PRED_PATH)
+
+    df["prediction_time"] = pd.to_datetime(df["prediction_time"], errors="coerce", utc=True).dt.tz_convert(IST)
+    df["target_time"] = pd.to_datetime(df["target_time"], errors="coerce", utc=True).dt.tz_convert(IST)
+
+    return df
+
+
+# ------------------------------------------------
+# CURRENT WEATHER
+# ------------------------------------------------
+@app.route("/current")
+def current_weather():
+    df = read_weather_data()
+
+    if df is None or df.empty:
+        return jsonify({
+            "temperature": None,
+            "humidity": None,
+            "pressure": None,
+            "rainfall": None
+        })
+
+    latest = df.iloc[-1]
+
+    return jsonify({
+        "temperature": float(latest["temperature"]),
+        "humidity": float(latest["humidity"]),
+        "pressure": float(latest["pressure"]),
+        "rainfall": float(latest["rainfall"])
+    })
+
+
+# ------------------------------------------------
+# BUILD FEATURES
 # ------------------------------------------------
 def build_input_features():
-    df = get_all_data()
+    df = read_weather_data()
 
     if df is None or len(df) < 13:
         return None
@@ -43,31 +148,10 @@ def build_input_features():
 
 
 # ------------------------------------------------
-# CURRENT WEATHER API
-# ------------------------------------------------
-@app.route("/current")
-def current_weather():
-    latest = get_latest_data()
-
-    if latest is None or len(latest) == 0:
-        return jsonify({"message": "No data available"})
-
-    latest = latest.iloc[0]
-
-    return jsonify({
-        "temperature": float(latest["temperature"]),
-        "humidity": float(latest["humidity"]),
-        "pressure": float(latest["pressure"]),
-        "rainfall": float(latest["rainfall"])
-    })
-
-
-# ------------------------------------------------
-# PREDICTION API
+# PREDICT
 # ------------------------------------------------
 @app.route("/predict")
 def predict_weather():
-
     input_data = build_input_features()
 
     if input_data is None:
@@ -75,9 +159,10 @@ def predict_weather():
 
     prediction = float(model.predict(input_data)[0])
 
-    prediction_time = datetime.now()
+    prediction_time = datetime.now(IST)
     target_time = prediction_time + timedelta(minutes=10)
 
+    # Save to CSV
     save_prediction(prediction_time, target_time, prediction)
 
     return jsonify({
@@ -87,123 +172,91 @@ def predict_weather():
 
 
 # ------------------------------------------------
-# AUTO EVALUATION
+# AUTO EVALUATE
 # ------------------------------------------------
 def auto_evaluate():
     predictions = get_predictions()
-    weather = get_all_data()
+    weather = read_weather_data()
 
-    if predictions is None or predictions.empty:
+    if predictions.empty or weather is None:
         return
 
-    if weather is None or weather.empty:
-        return
-
-    weather["timestamp"] = pd.to_datetime(weather["timestamp"])
-
-    updated = False
-
-    for index, row in predictions.iterrows():
+    for i, row in predictions.iterrows():
 
         if pd.isna(row["actual_temperature"]):
 
-            target_time = pd.to_datetime(row["target_time"])
-
-            if datetime.now() >= target_time:
+            if datetime.now(IST) >= row["target_time"]:
 
                 closest = weather.iloc[
-                    (weather["timestamp"] - target_time).abs().argsort()[:1]
+                    (weather["timestamp"] - row["target_time"]).abs().argsort()[:1]
                 ]
 
-                actual_temp = float(closest["temperature"].values[0])
-                predicted_temp = float(row["predicted_temperature"])
+                actual = float(closest["temperature"].values[0])
+                predicted = float(row["predicted_temperature"])
 
-                error = abs(actual_temp - predicted_temp)
+                predictions.at[i, "actual_temperature"] = actual
+                predictions.at[i, "error"] = abs(actual - predicted)
 
-                predictions.at[index, "actual_temperature"] = actual_temp
-                predictions.at[index, "error"] = error
-
-                updated = True
-
-    if updated:
-        DATA_PATH = os.path.join(BASE_DIR, "../data/predictions_log.csv")
-        predictions.to_csv(DATA_PATH, index=False)
+    predictions.to_csv(PRED_PATH, index=False)
 
 
 # ------------------------------------------------
-# ACCURACY API
+# ACCURACY
 # ------------------------------------------------
 @app.route("/accuracy")
 def accuracy():
     auto_evaluate()
 
-    predictions = get_predictions()
+    df = get_predictions()
 
-    if predictions is None or predictions.empty:
-        return jsonify({"message": "No predictions yet"})
+    valid = df["error"].dropna()
 
-    valid_errors = predictions["error"].dropna()
-
-    if valid_errors.empty:
+    if valid.empty:
         return jsonify({"message": "No evaluated predictions yet"})
 
-    mae = float(valid_errors.mean())
-
     return jsonify({
-        "Average_MAE": mae,
-        "Total_Evaluated": int(valid_errors.count())
+        "Average_MAE": float(valid.mean()),
+        "Total_Evaluated": int(valid.count())
     })
 
 
 # ------------------------------------------------
-# FORECAST HISTORY
+# HISTORY
 # ------------------------------------------------
 @app.route("/history")
 def history():
     auto_evaluate()
 
-    predictions = get_predictions()
+    df = get_predictions().dropna()
 
-    if predictions is None or predictions.empty:
-        return jsonify([])
-
-    predictions = predictions.dropna()
-
-    if predictions.empty:
-        return jsonify([])
-
-    return jsonify(
-        predictions.tail(10).to_dict(orient="records")
-    )
+    return jsonify(df.tail(10).to_dict(orient="records"))
 
 
 # ------------------------------------------------
-# LIVE TEMPERATURE HISTORY
+# LIVE HISTORY
 # ------------------------------------------------
 @app.route("/live-history")
 def live_history():
-    weather = get_all_data()
+    df = read_weather_data()
 
-    if weather is None or weather.empty:
+    if df is None:
         return jsonify([])
 
-    weather = weather.tail(30)
-
     return jsonify(
-        weather[["timestamp", "temperature"]].to_dict(orient="records")
+        df.tail(30)[["timestamp", "temperature"]].to_dict(orient="records")
     )
 
 
 # ------------------------------------------------
-# ROOT CHECK (IMPORTANT FOR RENDER)
+# ROOT
 # ------------------------------------------------
 @app.route("/")
 def home():
-    return jsonify({"message": "IoT Weather Backend Running"})
+    return jsonify({"message": "IoT Weather Backend Running (FINAL CSV MODE)"})
 
 
 # ------------------------------------------------
-# RUN APP (RENDER READY)
+# RUN
 # ------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=5000, debug=True)
